@@ -112,6 +112,7 @@ dependencies = [
  "axe-language",
  "axe-lsp",
  "axe-tree-sitter",
+ "bit-set",
  "clap",
  "forma-io",
  "forma_core",

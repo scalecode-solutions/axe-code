@@ -26,6 +26,9 @@ forma_sif = { workspace = true }
 forma_json = { workspace = true }
 sif-parser = { workspace = true }
 
+# Core
+bit-set = { workspace = true }
+
 # Tree-sitter
 tree-sitter = { workspace = true }
 

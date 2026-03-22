@@ -15,13 +15,19 @@ pub enum Severity {
 
 /// Complete rule configuration from a rule file.
 #[derive(Clone, Debug, Serialize, Deserialize)]
+#[forma(deny_unknown_fields)]
 pub struct RuleConfig {
     pub id: String,
     pub language: String,
     pub rule: SerializableRule,
+    #[forma(default)]
     pub severity: Option<Severity>,
+    #[forma(default)]
     pub message: Option<String>,
+    #[forma(default)]
     pub note: Option<String>,
+    #[forma(default)]
     pub fix: Option<String>,
+    #[forma(default)]
     pub url: Option<String>,
 }
