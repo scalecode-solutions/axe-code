@@ -5,6 +5,9 @@ use thiserror::Error;
 
 use crate::rule::{Rule, SerializableRule};
 
+/// Maximum nesting depth for composite rules (prevents stack overflow).
+const MAX_RULE_DEPTH: usize = 32;
+
 /// Errors during rule compilation.
 #[derive(Debug, Error)]
 pub enum CompileError {
@@ -16,6 +19,8 @@ pub enum CompileError {
     UnknownKind(String),
     #[error("rule has no positive matcher (pattern, kind, regex, or matches)")]
     NoPositiveMatcher,
+    #[error("rule nesting depth exceeds limit ({MAX_RULE_DEPTH})")]
+    TooDeep,
 }
 
 /// Context for rule compilation — provides pattern compilation and kind resolution.
@@ -37,28 +42,43 @@ where
     F: Fn(&str) -> Result<(axe_core::match_tree::PatternNode, Option<bit_set::BitSet>), String>,
     K: Fn(&str) -> Option<u16>,
 {
+    compile_rule_inner(rule, ctx, 0)
+}
+
+fn compile_rule_inner<F, K>(
+    rule: &SerializableRule,
+    ctx: &CompileContext<F, K>,
+    depth: usize,
+) -> Result<Rule, CompileError>
+where
+    F: Fn(&str) -> Result<(axe_core::match_tree::PatternNode, Option<bit_set::BitSet>), String>,
+    K: Fn(&str) -> Option<u16>,
+{
+    if depth > MAX_RULE_DEPTH {
+        return Err(CompileError::TooDeep);
+    }
+
     // Composite rules.
     if let Some(all) = &rule.all {
         let compiled: Result<Vec<Rule>, _> = all.iter()
-            .map(|r| compile_rule(r, ctx))
+            .map(|r| compile_rule_inner(r, ctx, depth + 1))
             .collect();
         return Ok(Rule::All(compiled?));
     }
     if let Some(any) = &rule.any {
         let compiled: Result<Vec<Rule>, _> = any.iter()
-            .map(|r| compile_rule(r, ctx))
+            .map(|r| compile_rule_inner(r, ctx, depth + 1))
             .collect();
         return Ok(Rule::Any(compiled?));
     }
     if let Some(not) = &rule.not {
-        let inner = compile_rule(not, ctx)?;
+        let inner = compile_rule_inner(not, ctx, depth + 1)?;
         return Ok(Rule::Not(Box::new(inner)));
     }
 
     // Collect atomic + relational matchers.
     let mut matchers = Vec::new();
 
-    // Atomic: pattern.
     if let Some(pattern_str) = &rule.pattern {
         let (node, kinds) = (ctx.compile_pattern)(pattern_str)
             .map_err(CompileError::Pattern)?;
@@ -69,28 +89,24 @@ where
         });
     }
 
-    // Atomic: kind.
     if let Some(kind_str) = &rule.kind {
         let kind_id = (ctx.resolve_kind)(kind_str)
             .ok_or_else(|| CompileError::UnknownKind(kind_str.clone()))?;
         matchers.push(Rule::Kind { kind_id });
     }
 
-    // Atomic: regex.
     if let Some(regex_str) = &rule.regex {
         let pattern = regex::Regex::new(regex_str)?;
         matchers.push(Rule::Regex { pattern });
     }
 
-    // Relational: inside.
     if let Some(inside) = &rule.inside {
-        let inner = compile_rule(&inside.rule, ctx)?;
+        let inner = compile_rule_inner(&inside.rule, ctx, depth + 1)?;
         matchers.push(Rule::Inside(Box::new(inner)));
     }
 
-    // Relational: has.
     if let Some(has) = &rule.has {
-        let inner = compile_rule(&has.rule, ctx)?;
+        let inner = compile_rule_inner(&has.rule, ctx, depth + 1)?;
         matchers.push(Rule::Has(Box::new(inner)));
     }
 

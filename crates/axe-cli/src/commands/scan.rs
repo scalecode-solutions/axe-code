@@ -93,17 +93,20 @@ pub fn execute(args: ScanArgs, format: OutputFormat) -> Result<ExitCode, Box<dyn
 
     let max_results = args.max_results;
 
-    let mut out = std::io::BufWriter::new(std::io::stdout().lock());
     let mut total_hits = 0u64;
 
-    // Emit header.
-    match format {
-        OutputFormat::Sif => {
-            writeln!(out, "#!sif v1 origin=axe/scan")?;
-            writeln!(out, "#schema file:str:311 line:uint:341 col:uint:341 rule:str severity:str message:str match:str")?;
+    // Emit header then drop the lock before spawning threads.
+    {
+        let mut out = std::io::BufWriter::new(std::io::stdout().lock());
+        match format {
+            OutputFormat::Sif => {
+                writeln!(out, "#!sif v1 origin=axe/scan")?;
+                writeln!(out, "#schema file:str:311 line:uint:341 col:uint:341 rule:str severity:str message:str match:str")?;
+            }
+            _ => {}
         }
-        _ => {}
-    }
+        out.flush()?;
+    } // stdout lock dropped here
 
     // For each language, build a CombinedScan and walk files in parallel.
     for (lang_str, rules) in &lang_rules {
@@ -238,7 +241,6 @@ pub fn execute(args: ScanArgs, format: OutputFormat) -> Result<ExitCode, Box<dyn
         total_hits += hits;
     }
 
-    out.flush()?;
     eprintln!("axe scan: {total_hits} issues found ({} rules)", configs.len());
 
     if total_hits > 0 {
