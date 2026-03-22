@@ -147,6 +147,21 @@ impl<'tree, D: Doc> MetaVarEnv<'tree, D> {
     pub fn insert_transformed(&mut self, name: String, value: Vec<<D::Source as Content>::Underlying>) {
         self.transformed.insert(name, value);
     }
+
+    /// Iterate over all single-node captures as `(name, node)` pairs.
+    pub fn iter_singles(&self) -> impl Iterator<Item = (&str, &crate::node::Node<'tree, D>)> {
+        self.single.iter().map(|(k, v)| (k.as_str(), v))
+    }
+
+    /// Iterate over all multi-node captures.
+    pub fn iter_multis(&self) -> impl Iterator<Item = (&str, &[crate::node::Node<'tree, D>])> {
+        self.multi.iter().map(|(k, v)| (k.as_str(), v.as_slice()))
+    }
+
+    /// Number of single captures.
+    pub fn singles_count(&self) -> usize {
+        self.single.len()
+    }
 }
 
 impl<'tree, D: Doc> Default for MetaVarEnv<'tree, D> {

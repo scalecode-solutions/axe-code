@@ -267,6 +267,11 @@ impl SupportLang {
         None
     }
 
+    /// Whether this language uses a non-standard meta-var char.
+    fn uses_expando(&self) -> bool {
+        matches!(self, Self::Bash)
+    }
+
     /// All supported languages.
     pub fn all() -> &'static [Self] {
         &[
@@ -291,6 +296,67 @@ impl SupportLang {
             Self::Tsx,
             Self::Yaml,
         ]
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Language trait impl for SupportLang
+// ---------------------------------------------------------------------------
+
+impl Language for SupportLang {
+    fn pre_process_pattern<'q>(&self, query: &'q str) -> Cow<'q, str> {
+        let mc = self.meta_var_char();
+        let ec = self.expando_char();
+        if mc == ec {
+            // Standard language — replace $ with µ.
+            if query.contains('$') {
+                Cow::Owned(query.replace('$', "µ"))
+            } else {
+                Cow::Borrowed(query)
+            }
+        } else {
+            // Non-standard (e.g., Bash uses #).
+            if query.contains(mc) {
+                Cow::Owned(query.replace(mc, &ec.to_string()))
+            } else {
+                Cow::Borrowed(query)
+            }
+        }
+    }
+
+    fn meta_var_char(&self) -> char {
+        if self.uses_expando() {
+            '#' // Bash
+        } else {
+            '$'
+        }
+    }
+
+    fn expando_char(&self) -> char {
+        'µ'
+    }
+
+    fn kind_to_id(&self, kind: &str) -> Option<u16> {
+        let lang = self.ts_language();
+        let id = lang.id_for_node_kind(kind, true);
+        if id == 0 {
+            let id = lang.id_for_node_kind(kind, false);
+            if id == 0 { None } else { Some(id) }
+        } else {
+            Some(id)
+        }
+    }
+
+    fn id_to_kind(&self, id: u16) -> &str {
+        self.ts_language().node_kind_for_id(id).unwrap_or("UNKNOWN")
+    }
+
+    fn field_to_id(&self, field: &str) -> Option<u16> {
+        self.ts_language().field_id_for_name(field).map(|id| id.get())
+    }
+
+    fn kind_count(&self) -> usize {
+        self.ts_language().node_kind_count()
     }
 }
 
