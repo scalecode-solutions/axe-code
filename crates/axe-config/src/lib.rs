@@ -11,4 +11,4 @@ pub mod transform;
 pub use combined::{CombinedScan, ScanHit};
 pub use compiler::{compile_rule, CompileContext, CompileError};
 pub use rule::Rule;
-pub use rule_config::{RuleConfig, Severity};
+pub use rule_config::{ProjectConfig, RuleConfig, RuleTest, Severity};

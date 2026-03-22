@@ -163,40 +163,58 @@ fn load_rule_configs(args: &ScanArgs) -> Result<Vec<RuleConfig>, Box<dyn std::er
 
     // Load from --rule files/dirs.
     for rule_path_str in &args.rule {
-        let rule_path = Path::new(rule_path_str);
-        if rule_path.is_dir() {
-            // Load all .json files in directory.
-            for entry in std::fs::read_dir(rule_path)? {
-                let entry = entry?;
-                let path = entry.path();
-                if path.extension().is_some_and(|e| e == "json") {
-                    let content = std::fs::read_to_string(&path)?;
-                    match load_rule_from_json(&content) {
-                        Ok(config) => configs.push(config),
-                        Err(e) => {
-                            tracing::warn!("{}: {e}", path.display());
-                        }
-                    }
-                }
-            }
-        } else {
-            let content = std::fs::read_to_string(rule_path)?;
-            match load_rule_from_json(&content) {
-                Ok(config) => configs.push(config),
-                Err(e) => {
-                    return Err(format!("{}: {e}", rule_path.display()).into());
-                }
-            }
-        }
+        load_rules_from_path(Path::new(rule_path_str), &mut configs)?;
     }
 
     // Load from --inline-rules.
     if let Some(ref inline) = args.inline_rules {
-        let config = load_rule_from_json(inline)?;
-        configs.push(config);
+        configs.push(load_rule_from_json(inline)?);
+    }
+
+    // If no explicit rules, try auto-discovering from axeconfig.json.
+    if configs.is_empty() {
+        let start = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+        if let Some((project_root, project_config)) = axe_config::ProjectConfig::discover(&start) {
+            eprintln!("axe: using config from {}", project_root.join("axeconfig.json").display());
+            for dir in &project_config.rule_dirs {
+                let full = project_root.join(dir);
+                if full.is_dir() {
+                    load_rules_from_path(&full, &mut configs)?;
+                } else {
+                    tracing::warn!("rule_dirs entry not found: {}", full.display());
+                }
+            }
+            for file in &project_config.rules {
+                let full = project_root.join(file);
+                load_rules_from_path(&full, &mut configs)?;
+            }
+        }
     }
 
     Ok(configs)
+}
+
+fn load_rules_from_path(path: &Path, configs: &mut Vec<RuleConfig>) -> Result<(), Box<dyn std::error::Error>> {
+    if path.is_dir() {
+        for entry in std::fs::read_dir(path)? {
+            let entry = entry?;
+            let p = entry.path();
+            if p.extension().is_some_and(|e| e == "json") {
+                let content = std::fs::read_to_string(&p)?;
+                match load_rule_from_json(&content) {
+                    Ok(config) => configs.push(config),
+                    Err(e) => tracing::warn!("{}: {e}", p.display()),
+                }
+            }
+        }
+    } else if path.exists() {
+        let content = std::fs::read_to_string(path)?;
+        configs.push(load_rule_from_json(&content)
+            .map_err(|e| format!("{}: {e}", path.display()))?);
+    } else {
+        return Err(format!("rule path not found: {}", path.display()).into());
+    }
+    Ok(())
 }
 
 fn load_rule_from_json(json: &str) -> Result<RuleConfig, Box<dyn std::error::Error>> {

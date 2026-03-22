@@ -16,8 +16,8 @@ thiserror = { workspace = true }
 ahash = { workspace = true }
 bit-set = { workspace = true }
 regex = { workspace = true }
+forma_json = { workspace = true }
 
 [dev-dependencies]
 insta = { workspace = true }
 forma_sif = { workspace = true }
-forma_json = { workspace = true }

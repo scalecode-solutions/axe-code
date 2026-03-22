@@ -10,7 +10,8 @@ pub struct LspArgs {
 }
 
 pub fn execute(args: LspArgs) -> Result<ExitCode, Box<dyn std::error::Error>> {
-    tracing::debug!(?args, "executing lsp command");
-    eprintln!("axe lsp: not yet implemented");
+    tracing::info!("starting axe LSP server");
+    let rt = tokio::runtime::Runtime::new()?;
+    rt.block_on(axe_lsp::run_server());
     Ok(ExitCode::SUCCESS)
 }

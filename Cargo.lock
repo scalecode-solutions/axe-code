@@ -123,6 +123,7 @@ dependencies = [
  "insta",
  "sif-parser",
  "termcolor",
+ "tokio",
  "tracing",
  "tracing-subscriber",
  "tree-sitter 0.26.7",
@@ -202,8 +203,10 @@ version = "0.1.0"
 dependencies = [
  "axe-config",
  "axe-core",
+ "axe-language",
  "axe-tree-sitter",
  "dashmap 6.1.0",
+ "forma_json",
  "tokio",
  "tower-lsp",
  "tracing",
