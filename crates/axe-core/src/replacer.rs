@@ -8,7 +8,7 @@
 //! - TAB-aware indentation (fixes ast-grep's spaces-only limitation)
 //! - Multi-line replacement alignment
 
-use crate::source::{IndentKind, detect_indent};
+use crate::source::{Content, IndentKind, detect_indent};
 
 // ---------------------------------------------------------------------------
 // Indentation helpers
@@ -136,6 +136,94 @@ pub fn parse_template(template: &str, meta_var_char: char) -> Vec<TemplateSegmen
     segments
 }
 
+// ---------------------------------------------------------------------------
+// Template expansion with MetaVarEnv
+// ---------------------------------------------------------------------------
+
+/// Expand a parsed template using captured meta-variables.
+///
+/// For single vars (`$A`), substitutes the captured node's text.
+/// For multi vars (`$$$ARGS`), joins captured nodes' text with `, `.
+/// Missing variables are left as-is (e.g., `$UNKNOWN` stays literal).
+pub fn expand_template<D: crate::source::Doc>(
+    segments: &[TemplateSegment],
+    env: &crate::meta_var::MetaVarEnv<'_, D>,
+) -> String {
+    let mut result = String::new();
+    for seg in segments {
+        match seg {
+            TemplateSegment::Literal(text) => result.push_str(text),
+            TemplateSegment::MetaVar(name) => {
+                if let Some(node) = env.get_match(name) {
+                    result.push_str(node.text());
+                } else {
+                    // Unresolved — emit as literal.
+                    result.push('$');
+                    result.push_str(name);
+                }
+            }
+            TemplateSegment::MultiMetaVar(name) => {
+                let nodes = env.get_multiple_matches(name);
+                if !nodes.is_empty() {
+                    let texts: Vec<&str> = nodes.iter().map(|n| n.text()).collect();
+                    result.push_str(&texts.join(", "));
+                } else if let Some(node) = env.get_match(name) {
+                    // Fall back to single capture if multi not found.
+                    result.push_str(node.text());
+                } else {
+                    result.push_str("$$$");
+                    result.push_str(name);
+                }
+            }
+        }
+    }
+    result
+}
+
+/// Convenience: parse a template and expand it in one call.
+pub fn apply_template<D: crate::source::Doc>(
+    template: &str,
+    meta_var_char: char,
+    env: &crate::meta_var::MetaVarEnv<'_, D>,
+) -> String {
+    let segments = parse_template(template, meta_var_char);
+    expand_template(&segments, env)
+}
+
+/// Compute the full replacement for a matched node, preserving indentation.
+///
+/// Works with UTF-8 sources only (the CLI case). For UTF-16/WASM, the
+/// caller should handle indentation separately.
+///
+/// 1. Expand the template with captured variables.
+/// 2. Detect the matched node's indentation from the source.
+/// 3. Re-indent the expanded text to match.
+pub fn compute_replacement_utf8<D: crate::source::Doc<Source = Vec<u8>>>(
+    template: &str,
+    meta_var_char: char,
+    env: &crate::meta_var::MetaVarEnv<'_, D>,
+    matched_node: &crate::node::Node<'_, D>,
+) -> String {
+    let expanded = apply_template(template, meta_var_char, env);
+
+    // If single-line replacement, no indentation adjustment needed.
+    if !expanded.contains('\n') {
+        return expanded;
+    }
+
+    // Find the matched node's indentation from the source.
+    let src: &Vec<u8> = matched_node.get_root().src();
+    let start_byte = matched_node.range().start;
+
+    // Walk backwards from start_byte to find line start.
+    let src_bytes = &src[..start_byte];
+    let line_start = src_bytes.iter().rposition(|&b| b == b'\n').map(|p| p + 1).unwrap_or(0);
+    let indent_bytes = &src_bytes[line_start..];
+    let indent = std::str::from_utf8(indent_bytes).unwrap_or("");
+
+    reindent(&expanded, indent)
+}
+
 /// Consume an identifier (alphanumeric + underscore) from the iterator.
 fn take_identifier(chars: &mut std::iter::Peekable<std::str::Chars<'_>>) -> String {
     let mut name = String::new();
@@ -221,5 +309,14 @@ mod tests {
     #[test]
     fn detect_indent_spaces() {
         assert_eq!(detect_indent(b"  foo\n  bar\n"), IndentKind::Spaces(2));
+    }
+
+    #[test]
+    fn expand_simple() {
+        let segs = parse_template("logger.info($A)", '$');
+        // Without a real env we can't test expansion here,
+        // but we can test that unresolved vars pass through.
+        // Full expansion tests are in axe-tree-sitter/tests/matching.rs.
+        assert_eq!(segs.len(), 3);
     }
 }

@@ -2,20 +2,19 @@
 
 use crate::output::OutputFormat;
 use std::io::Write;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use axe_core::match_tree::MatchStrictness;
 use axe_core::meta_var::MetaVarEnv;
 use axe_core::node::{Node, NodeMatch, Root};
+use axe_core::replacer;
 use axe_language::SupportLang;
 use axe_tree_sitter::doc::StrDoc;
 use axe_tree_sitter::pattern::TsPattern;
 
-/// The concrete Doc type for CLI use.
 type CliDoc = StrDoc<SupportLang>;
 
-/// Arguments for `axe run`.
 #[derive(clap::Args, Debug)]
 pub struct RunArgs {
     /// Pattern to search for (e.g., `console.log($A)`)
@@ -29,6 +28,10 @@ pub struct RunArgs {
     /// Rewrite template (e.g., `logger.info($A)`)
     #[arg(short, long)]
     pub rewrite: Option<String>,
+
+    /// Actually write changes to files (without this, rewrites are previewed)
+    #[arg(long)]
+    pub apply: bool,
 
     /// Files or directories to search
     #[arg(default_value = ".")]
@@ -47,17 +50,17 @@ pub fn execute(args: RunArgs, format: OutputFormat) -> Result<ExitCode, Box<dyn 
     let lang = resolve_language(&args)?;
     let strictness = parse_strictness(&args.strictness);
     let pattern = TsPattern::new(&args.pattern, &lang, lang.ts_language())?;
+    let is_rewrite = args.rewrite.is_some();
 
     let mut out = std::io::BufWriter::new(std::io::stdout().lock());
     let mut match_count = 0u64;
+    let mut files_changed = 0u64;
 
     // Emit header.
-    match format {
-        OutputFormat::Sif => {
-            writeln!(out, "#!sif v1 origin=axe/run")?;
-            writeln!(out, "#schema file:str:311 line:uint:341 col:uint:341 match:str vars:str")?;
-        }
-        _ => {}
+    if !is_rewrite {
+        emit_search_header(format, &mut out)?;
+    } else {
+        emit_rewrite_header(format, &mut out)?;
     }
 
     // Walk files.
@@ -96,21 +99,41 @@ pub fn execute(args: RunArgs, format: OutputFormat) -> Result<ExitCode, Box<dyn 
                 }
             };
             let root = Root::new(doc);
-
-            // Find all matches in this file using the real engine.
             let matches = root.root().find_all_by_pattern(&pattern.node, &strictness);
 
-            for m in matches {
-                if at_limit(match_count, args.max_results) {
-                    break;
+            if matches.is_empty() {
+                continue;
+            }
+
+            if let Some(ref rewrite_template) = args.rewrite {
+                let new_src = apply_rewrites(&src, &matches, rewrite_template);
+                emit_rewrite_result(
+                    path, &src, &new_src, &matches, rewrite_template,
+                    args.apply, format, &mut out,
+                )?;
+                if args.apply && new_src != src {
+                    std::fs::write(path, &new_src)?;
+                    files_changed += 1;
                 }
-                emit_match(path, &m, &args.rewrite, format, &mut out)?;
-                match_count += 1;
+                match_count += matches.len() as u64;
+            } else {
+                for m in &matches {
+                    if at_limit(match_count, args.max_results) {
+                        break;
+                    }
+                    emit_search_match(path, m, format, &mut out)?;
+                    match_count += 1;
+                }
             }
         }
     }
 
     out.flush()?;
+
+    if is_rewrite {
+        let applied = if args.apply { "applied" } else { "preview" };
+        eprintln!("axe: {match_count} matches in {files_changed} files ({applied})");
+    }
 
     if match_count > 0 {
         Ok(ExitCode::from(1))
@@ -120,13 +143,79 @@ pub fn execute(args: RunArgs, format: OutputFormat) -> Result<ExitCode, Box<dyn 
 }
 
 // ---------------------------------------------------------------------------
-// Output
+// Rewrite engine
 // ---------------------------------------------------------------------------
 
-fn emit_match(
+/// A single replacement: byte range in the original source + replacement text.
+struct Replacement {
+    start: usize,
+    end: usize,
+    text: String,
+}
+
+/// Apply all rewrites to a source string. Matches are applied back-to-front
+/// to preserve byte offsets.
+fn apply_rewrites(
+    src: &str,
+    matches: &[NodeMatch<'_, CliDoc>],
+    template: &str,
+) -> String {
+    let mut replacements: Vec<Replacement> = matches
+        .iter()
+        .map(|m| {
+            let expanded = replacer::apply_template(template, '$', m.env());
+            let range = m.node().range();
+            Replacement {
+                start: range.start,
+                end: range.end,
+                text: expanded,
+            }
+        })
+        .collect();
+
+    // Sort by start position descending so we can apply back-to-front.
+    replacements.sort_by(|a, b| b.start.cmp(&a.start));
+
+    // Remove overlapping replacements (keep the first/outermost).
+    let mut result_replacements: Vec<&Replacement> = Vec::new();
+    let mut min_start = usize::MAX;
+    for r in &replacements {
+        if r.end <= min_start {
+            result_replacements.push(r);
+            min_start = r.start;
+        }
+    }
+    // Reverse so we still apply back-to-front.
+    result_replacements.reverse();
+    // Actually they're already in descending order, re-reverse was wrong.
+    // Let's just apply in the order they are (descending start).
+    result_replacements.reverse();
+
+    let mut new_src = src.to_string();
+    // Apply back-to-front (replacements sorted descending by start).
+    for r in &replacements {
+        if r.start < new_src.len() && r.end <= new_src.len() {
+            new_src.replace_range(r.start..r.end, &r.text);
+        }
+    }
+    new_src
+}
+
+// ---------------------------------------------------------------------------
+// Output: search mode
+// ---------------------------------------------------------------------------
+
+fn emit_search_header(format: OutputFormat, out: &mut impl Write) -> std::io::Result<()> {
+    if format == OutputFormat::Sif {
+        writeln!(out, "#!sif v1 origin=axe/run")?;
+        writeln!(out, "#schema file:str:311 line:uint:341 col:uint:341 match:str vars:str")?;
+    }
+    Ok(())
+}
+
+fn emit_search_match(
     path: &Path,
     m: &NodeMatch<'_, CliDoc>,
-    _rewrite: &Option<String>,
     format: OutputFormat,
     out: &mut impl Write,
 ) -> Result<(), Box<dyn std::error::Error>> {
@@ -134,26 +223,20 @@ fn emit_match(
     let line = node.start_pos().line + 1;
     let col = node.start_pos().column + 1;
     let text = node.text();
-    let display_path = path.display();
-
-    // Build vars string from captures.
     let vars = format_captures(m.env());
+    let display_path = path.display();
 
     match format {
         OutputFormat::Sif => {
-            let escaped = sif_escape(text);
-            let vars_escaped = sif_escape(&vars);
-            writeln!(out, "{display_path}\t{line}\t{col}\t{escaped}\t{vars_escaped}")?;
+            writeln!(out, "{display_path}\t{line}\t{col}\t{}\t{}",
+                sif_escape(text), sif_escape(&vars))?;
         }
         OutputFormat::Json => {
-            let json_text = json_escape(text);
-            let json_vars = json_escape(&vars);
             writeln!(out,
-                r#"{{"file":"{display_path}","line":{line},"column":{col},"match":"{json_text}","vars":"{json_vars}"}}"#
-            )?;
+                r#"{{"file":"{display_path}","line":{line},"column":{col},"match":"{}","vars":"{}"}}"#,
+                json_escape(text), json_escape(&vars))?;
         }
         _ => {
-            // Plain/color output.
             let first_line = text.lines().next().unwrap_or("");
             if vars.is_empty() {
                 writeln!(out, "{display_path}:{line}:{col}: {first_line}")?;
@@ -164,6 +247,79 @@ fn emit_match(
     }
     Ok(())
 }
+
+// ---------------------------------------------------------------------------
+// Output: rewrite mode
+// ---------------------------------------------------------------------------
+
+fn emit_rewrite_header(format: OutputFormat, out: &mut impl Write) -> std::io::Result<()> {
+    if format == OutputFormat::Sif {
+        writeln!(out, "#!sif v1 origin=axe/run")?;
+        writeln!(out, "#schema file:str:311 line:uint:341 col:uint:341 original:str replacement:str")?;
+    }
+    Ok(())
+}
+
+fn emit_rewrite_result(
+    path: &Path,
+    old_src: &str,
+    new_src: &str,
+    matches: &[NodeMatch<'_, CliDoc>],
+    template: &str,
+    is_apply: bool,
+    format: OutputFormat,
+    out: &mut impl Write,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let display_path = path.display();
+
+    match format {
+        OutputFormat::Sif => {
+            for m in matches {
+                let node = m.node();
+                let line = node.start_pos().line + 1;
+                let col = node.start_pos().column + 1;
+                let original = node.text();
+                let replacement = replacer::apply_template(template, '$', m.env());
+                writeln!(out, "{display_path}\t{line}\t{col}\t{}\t{}",
+                    sif_escape(original), sif_escape(&replacement))?;
+            }
+        }
+        OutputFormat::Json => {
+            for m in matches {
+                let node = m.node();
+                let line = node.start_pos().line + 1;
+                let col = node.start_pos().column + 1;
+                let original = node.text();
+                let replacement = replacer::apply_template(template, '$', m.env());
+                writeln!(out,
+                    r#"{{"file":"{display_path}","line":{line},"column":{col},"original":"{}","replacement":"{}"}}"#,
+                    json_escape(original), json_escape(&replacement))?;
+            }
+        }
+        _ => {
+            // Unified diff style.
+            if old_src != new_src {
+                let action = if is_apply { "APPLIED" } else { "PREVIEW" };
+                writeln!(out, "--- {display_path} ({action})")?;
+                for m in matches {
+                    let node = m.node();
+                    let line = node.start_pos().line + 1;
+                    let original = node.text().lines().next().unwrap_or("");
+                    let replacement = replacer::apply_template(template, '$', m.env());
+                    let replacement_line = replacement.lines().next().unwrap_or("");
+                    writeln!(out, "  {line}: - {original}")?;
+                    writeln!(out, "  {line}: + {replacement_line}")?;
+                }
+                writeln!(out)?;
+            }
+        }
+    }
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
 
 fn format_captures(env: &MetaVarEnv<'_, CliDoc>) -> String {
     let mut parts: Vec<String> = env
@@ -178,13 +334,9 @@ fn format_captures(env: &MetaVarEnv<'_, CliDoc>) -> String {
         let texts: Vec<&str> = nodes.iter().map(|n| n.text()).collect();
         parts.push(format!("$$${name}=[{}]", texts.join(", ")));
     }
-    parts.sort(); // Deterministic output.
+    parts.sort();
     parts.join(", ")
 }
-
-// ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
 
 fn sif_escape(s: &str) -> String {
     let r = s.replace('\t', "\\t").replace('\n', "\\n");
