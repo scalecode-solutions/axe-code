@@ -1,0 +1,20 @@
+[package]
+name = "axe-tree-sitter"
+description = "Tree-sitter integration for axe — Doc/SgNode implementations"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+axe-core = { workspace = true }
+tree-sitter = { workspace = true }
+thiserror = { workspace = true }
+bit-set = { workspace = true }
+
+[dev-dependencies]
+insta = { workspace = true }
+axe-language = { workspace = true }
+tree-sitter-javascript = "0.23"
+tree-sitter-rust = "0.23"
+tree-sitter-python = "0.23"

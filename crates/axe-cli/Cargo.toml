@@ -1,0 +1,40 @@
+[package]
+name = "axe-cli"
+description = "CLI for axe — AST eXpression Engine"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[[bin]]
+name = "axe"
+path = "src/main.rs"
+
+[dependencies]
+axe-core = { workspace = true }
+axe-tree-sitter = { workspace = true }
+axe-config = { workspace = true }
+axe-language = { workspace = true }
+axe-dynamic = { workspace = true }
+axe-lsp = { workspace = true }
+
+# Serialization (forma, not serde)
+forma-io = { workspace = true }
+forma_core = { workspace = true }
+forma_derive = { workspace = true }
+forma_sif = { workspace = true }
+forma_json = { workspace = true }
+sif-parser = { workspace = true }
+
+# Tree-sitter
+tree-sitter = { workspace = true }
+
+# CLI
+clap = { workspace = true }
+ignore = { workspace = true }
+termcolor = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+
+[dev-dependencies]
+insta = { workspace = true }

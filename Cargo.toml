@@ -1,0 +1,71 @@
+[workspace]
+resolver = "3"
+members = [
+  "crates/axe-core",
+  "crates/axe-tree-sitter",
+  "crates/axe-config",
+  "crates/axe-language",
+  "crates/axe-dynamic",
+  "crates/axe-cli",
+  "crates/axe-lsp",
+  # "crates/axe-napi",
+  # "crates/axe-pyo3",
+  # "crates/axe-wasm",
+  # "crates/axe-plugin",
+  # "crates/axe-debugger",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+rust-version = "1.85"
+repository = "https://github.com/scalecode-solutions/axe-code"
+
+[workspace.dependencies]
+# Internal crates
+axe-core = { path = "crates/axe-core" }
+axe-tree-sitter = { path = "crates/axe-tree-sitter" }
+axe-config = { path = "crates/axe-config" }
+axe-language = { path = "crates/axe-language" }
+axe-dynamic = { path = "crates/axe-dynamic" }
+axe-lsp = { path = "crates/axe-lsp" }
+
+# Serialization (forma, not serde)
+forma-io = { version = "0.1.0", features = ["derive", "json", "sif"] }
+forma_core = "0.1.0"
+forma_derive = "0.1.0"
+forma_sif = "0.1.0"
+forma_json = "0.1.0"
+sif-parser = "0.1.0"
+
+# Tree-sitter
+tree-sitter = "0.26"
+
+# Core
+ahash = "0.8"
+bit-set = "0.8"
+regex = "1"
+thiserror = "2"
+memchr = "2"
+
+# CLI
+clap = { version = "4", features = ["derive"] }
+ignore = "0.4"
+termcolor = "1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# LSP
+tower-lsp = "0.20"
+dashmap = "6"
+tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
+
+# Dynamic loading
+libloading = "0.8"
+
+# Config
+globset = "0.4"
+
+# Testing
+insta = "1"

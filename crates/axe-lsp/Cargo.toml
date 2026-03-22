@@ -1,0 +1,16 @@
+[package]
+name = "axe-lsp"
+description = "Language Server Protocol implementation for axe"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+axe-core = { workspace = true }
+axe-tree-sitter = { workspace = true }
+axe-config = { workspace = true }
+tower-lsp = { workspace = true }
+dashmap = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }

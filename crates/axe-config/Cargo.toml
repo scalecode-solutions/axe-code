@@ -1,0 +1,23 @@
+[package]
+name = "axe-config"
+description = "Rule configuration, deserialization, and combined scanning for axe"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+axe-core = { workspace = true }
+forma-io = { workspace = true }
+forma_core = { workspace = true }
+forma_derive = { workspace = true }
+globset = { workspace = true }
+thiserror = { workspace = true }
+ahash = { workspace = true }
+bit-set = { workspace = true }
+regex = { workspace = true }
+
+[dev-dependencies]
+insta = { workspace = true }
+forma_sif = { workspace = true }
+forma_json = { workspace = true }

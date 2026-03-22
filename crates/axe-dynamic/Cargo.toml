@@ -1,0 +1,13 @@
+[package]
+name = "axe-dynamic"
+description = "Dynamic tree-sitter language loading for axe"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+axe-core = { workspace = true }
+tree-sitter = { workspace = true }
+libloading = { workspace = true }
+thiserror = { workspace = true }

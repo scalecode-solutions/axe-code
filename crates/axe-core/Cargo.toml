@@ -1,0 +1,17 @@
+[package]
+name = "axe-core"
+description = "Core pattern matching engine for axe — AST eXpression Engine"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+ahash = { workspace = true }
+bit-set = { workspace = true }
+regex = { workspace = true }
+thiserror = { workspace = true }
+memchr = { workspace = true }
+
+[dev-dependencies]
+insta = { workspace = true }
