@@ -36,12 +36,18 @@ pub struct ScanArgs {
     /// Maximum number of results
     #[arg(long)]
     pub max_results: Option<usize>,
+
+    /// Apply fixes for rules that have fix templates
+    #[arg(long)]
+    pub apply: bool,
 }
 
 /// A scan hit sent through the channel from worker threads.
 struct ScanResult {
     path: PathBuf,
     hits: Vec<ScanHitEntry>,
+    /// Original source text, included when --apply is used.
+    src: Option<String>,
 }
 
 /// A single scan hit entry extracted from the tree (thread-safe, owns its data).
@@ -50,6 +56,8 @@ struct ScanHitEntry {
     line: usize,
     col: usize,
     text: String,
+    /// For --apply: byte range and replacement text.
+    fix: Option<(usize, usize, String)>,
 }
 
 pub fn execute(args: ScanArgs, format: OutputFormat) -> Result<ExitCode, Box<dyn std::error::Error>> {
@@ -92,8 +100,11 @@ pub fn execute(args: ScanArgs, format: OutputFormat) -> Result<ExitCode, Box<dyn
     }
 
     let max_results = args.max_results;
+    let apply = args.apply;
 
     let mut total_hits = 0u64;
+    let mut total_files_changed = 0u64;
+    let mut all_sarif_results = Vec::new();
 
     // Emit header then drop the lock before spawning threads.
     {
@@ -142,9 +153,12 @@ pub fn execute(args: ScanArgs, format: OutputFormat) -> Result<ExitCode, Box<dyn
 
         // Spawn receiver thread for output.
         let rule_meta_recv = Arc::clone(&rule_meta);
-        let output_handle = thread::spawn(move || -> Result<u64, Box<dyn std::error::Error + Send + Sync>> {
+        let output_handle = thread::spawn(move || -> Result<(u64, u64, Vec<SarifResult>), Box<dyn std::error::Error + Send + Sync>> {
             let mut out = std::io::BufWriter::new(std::io::stdout().lock());
             let mut hit_count = 0u64;
+            let mut files_changed = 0u64;
+            let mut sarif_results = Vec::new();
+            let is_sarif = format == OutputFormat::Sarif;
 
             for result in rx {
                 for entry in &result.hits {
@@ -156,17 +170,56 @@ pub fn execute(args: ScanArgs, format: OutputFormat) -> Result<ExitCode, Box<dyn
                         break;
                     }
                     let msg = message.as_deref().unwrap_or(rule_id);
-                    emit_scan_entry(
-                        &result.path, entry.line, entry.col,
-                        rule_id, severity, msg, &entry.text,
-                        format, &mut out,
-                    )?;
+                    if is_sarif {
+                        sarif_results.push(SarifResult {
+                            rule_id: rule_id.clone(),
+                            severity: severity_str(severity).to_string(),
+                            message: msg.to_string(),
+                            file: result.path.display().to_string(),
+                            line: entry.line,
+                            col: entry.col,
+                        });
+                    } else {
+                        emit_scan_entry(
+                            &result.path, entry.line, entry.col,
+                            rule_id, severity, msg, &entry.text,
+                            format, &mut out,
+                        )?;
+                    }
                     hit_count += 1;
+                }
+
+                // Apply fixes when --apply is set.
+                if apply {
+                    let fixes: Vec<&(usize, usize, String)> = result
+                        .hits
+                        .iter()
+                        .filter_map(|e| e.fix.as_ref())
+                        .collect();
+                    if !fixes.is_empty() {
+                        if let Some(ref src) = result.src {
+                            let mut new_src = src.clone();
+                            let mut sorted_fixes = fixes;
+                            sorted_fixes.sort_by(|a, b| b.0.cmp(&a.0)); // descending by start
+                            for (start, end, replacement) in sorted_fixes {
+                                if *start < new_src.len() && *end <= new_src.len() {
+                                    new_src.replace_range(*start..*end, replacement);
+                                }
+                            }
+                            if new_src != *src {
+                                if let Err(e) = std::fs::write(&result.path, &new_src) {
+                                    eprintln!("axe: error writing {}: {e}", result.path.display());
+                                } else {
+                                    files_changed += 1;
+                                }
+                            }
+                        }
+                    }
                 }
             }
 
             out.flush()?;
-            Ok(hit_count)
+            Ok((hit_count, files_changed, sarif_results))
         });
 
         // Run parallel walker.
@@ -207,7 +260,7 @@ pub fn execute(args: ScanArgs, format: OutputFormat) -> Result<ExitCode, Box<dyn
                     }
                 };
                 let root = Root::new(doc);
-                let hits = scanner.scan(&root.root());
+                let hits = scanner.scan(&root.root(), &src);
 
                 if hits.is_empty() {
                     return ignore::WalkState::Continue;
@@ -217,11 +270,25 @@ pub fn execute(args: ScanArgs, format: OutputFormat) -> Result<ExitCode, Box<dyn
                     .iter()
                     .map(|hit| {
                         let node = hit.node_match.node();
+                        let fix = if apply {
+                            scanner.fix(hit.rule_idx).map(|template| {
+                                let replacement = axe_core::replacer::apply_template(
+                                    template,
+                                    '$',
+                                    hit.node_match.env(),
+                                );
+                                let range = node.range();
+                                (range.start, range.end, replacement)
+                            })
+                        } else {
+                            None
+                        };
                         ScanHitEntry {
                             rule_idx: hit.rule_idx,
                             line: node.start_pos().line + 1,
                             col: node.start_pos().column + 1,
                             text: node.text().to_string(),
+                            fix,
                         }
                     })
                     .collect();
@@ -229,6 +296,7 @@ pub fn execute(args: ScanArgs, format: OutputFormat) -> Result<ExitCode, Box<dyn
                 let _ = tx.send(ScanResult {
                     path: path.to_path_buf(),
                     hits: entries,
+                    src: if apply { Some(src) } else { None },
                 });
 
                 ignore::WalkState::Continue
@@ -236,12 +304,25 @@ pub fn execute(args: ScanArgs, format: OutputFormat) -> Result<ExitCode, Box<dyn
         });
         drop(tx);
 
-        let hits = output_handle.join().unwrap()
+        let (hits, files_changed, sarif_results) = output_handle.join().unwrap()
             .map_err(|e| -> Box<dyn std::error::Error> { e })?;
         total_hits += hits;
+        total_files_changed += files_changed;
+        all_sarif_results.extend(sarif_results);
     }
 
-    eprintln!("axe scan: {total_hits} issues found ({} rules)", configs.len());
+    // Emit SARIF document after all languages have been processed.
+    if format == OutputFormat::Sarif {
+        let mut out = std::io::BufWriter::new(std::io::stdout().lock());
+        emit_sarif(&all_sarif_results, &mut out)?;
+        out.flush()?;
+    }
+
+    if apply && total_files_changed > 0 {
+        eprintln!("axe scan: {total_hits} issues found, {total_files_changed} files fixed ({} rules)", configs.len());
+    } else {
+        eprintln!("axe scan: {total_hits} issues found ({} rules)", configs.len());
+    }
 
     if total_hits > 0 {
         Ok(ExitCode::from(1))
@@ -368,6 +449,50 @@ fn emit_scan_entry(
             writeln!(out, "  {first_line}")?;
         }
     }
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// SARIF output
+// ---------------------------------------------------------------------------
+
+/// A collected SARIF result entry.
+struct SarifResult {
+    rule_id: String,
+    severity: String,
+    message: String,
+    file: String,
+    line: usize,
+    col: usize,
+}
+
+/// Emit a complete SARIF 2.1.0 JSON document.
+fn emit_sarif(results: &[SarifResult], out: &mut impl Write) -> std::io::Result<()> {
+    write!(
+        out,
+        r#"{{"$schema":"https://raw.githubusercontent.com/oasis-tcs/sarif-spec/main/Schemata/sarif-schema-2.1.0.json","version":"2.1.0","runs":[{{"tool":{{"driver":{{"name":"axe","version":"0.1.0","informationUri":"https://github.com/scalecode-solutions/axe-code"}}}},"results":["#
+    )?;
+    for (i, r) in results.iter().enumerate() {
+        if i > 0 {
+            write!(out, ",")?;
+        }
+        let level = match r.severity.as_str() {
+            "error" => "error",
+            "warning" => "warning",
+            _ => "note",
+        };
+        write!(
+            out,
+            r#"{{"ruleId":"{}","level":"{}","message":{{"text":"{}"}},"locations":[{{"physicalLocation":{{"artifactLocation":{{"uri":"{}"}},"region":{{"startLine":{},"startColumn":{}}}}}}}]}}"#,
+            json_escape(&r.rule_id),
+            level,
+            json_escape(&r.message),
+            json_escape(&r.file),
+            r.line,
+            r.col
+        )?;
+    }
+    writeln!(out, "]}}}}")?;
     Ok(())
 }
 

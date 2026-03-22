@@ -117,6 +117,11 @@ impl Backend {
                     let start = n.start_pos();
                     let end = n.end_pos();
 
+                    // Check for suppression comments.
+                    if is_suppressed(&doc.content, start.line, &config.id) {
+                        continue;
+                    }
+
                     let severity = match config.severity.unwrap_or_default() {
                         Severity::Error => DiagnosticSeverity::ERROR,
                         Severity::Warning => DiagnosticSeverity::WARNING,
@@ -167,6 +172,7 @@ impl LanguageServer for Backend {
                 text_document_sync: Some(TextDocumentSyncCapability::Kind(
                     TextDocumentSyncKind::FULL,
                 )),
+                code_action_provider: Some(CodeActionProviderCapability::Simple(true)),
                 ..Default::default()
             },
             ..Default::default()
@@ -219,6 +225,107 @@ impl LanguageServer for Backend {
     async fn did_close(&self, params: DidCloseTextDocumentParams) {
         self.documents.remove(&params.text_document.uri);
     }
+
+    async fn code_action(&self, params: CodeActionParams) -> Result<Option<CodeActionResponse>> {
+        let uri = params.text_document.uri;
+        let Some(doc) = self.documents.get(&uri) else {
+            return Ok(None);
+        };
+        let Some(lang) = doc.lang else {
+            return Ok(None);
+        };
+
+        let rules = self.rules.read().await;
+        let mut actions = Vec::new();
+
+        // For each diagnostic in the request range, check if the rule has a fix.
+        for diag in &params.context.diagnostics {
+            if diag.source.as_deref() != Some("axe") {
+                continue;
+            }
+            let rule_id = match &diag.code {
+                Some(NumberOrString::String(id)) => id.as_str(),
+                _ => continue,
+            };
+
+            // Find the rule with this ID.
+            for (rule, config) in rules.iter() {
+                if config.id != rule_id {
+                    continue;
+                }
+                if let Some(ref fix_template) = config.fix {
+                    let parsed = match StrDoc::new(&doc.content, lang, lang.ts_language()) {
+                        Ok(d) => d,
+                        Err(_) => continue,
+                    };
+                    let root = Root::new(parsed);
+
+                    for node in root.root().dfs() {
+                        let start = node.start_pos();
+                        if start.line as u32 == diag.range.start.line
+                            && start.column as u32 == diag.range.start.character
+                        {
+                            if let Some(m) = rule.match_node(node) {
+                                let replacement =
+                                    axe_core::replacer::apply_template(fix_template, '$', m.env());
+                                let edit = TextEdit {
+                                    range: diag.range,
+                                    new_text: replacement,
+                                };
+                                let mut changes = HashMap::new();
+                                changes.insert(uri.clone(), vec![edit]);
+
+                                actions.push(CodeActionOrCommand::CodeAction(CodeAction {
+                                    title: format!("Fix: {} (axe)", config.id),
+                                    kind: Some(CodeActionKind::QUICKFIX),
+                                    diagnostics: Some(vec![diag.clone()]),
+                                    edit: Some(WorkspaceEdit {
+                                        changes: Some(changes),
+                                        ..Default::default()
+                                    }),
+                                    ..Default::default()
+                                }));
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        Ok(if actions.is_empty() { None } else { Some(actions) })
+    }
+}
+
+/// Check if a hit at the given 0-indexed line is suppressed by a comment on the line above.
+fn is_suppressed(src: &str, line: usize, rule_id: &str) -> bool {
+    if line == 0 {
+        return false;
+    }
+    let lines: Vec<&str> = src.lines().collect();
+    let prev_line = if line <= lines.len() {
+        lines[line - 1].trim()
+    } else {
+        return false;
+    };
+
+    for prefix in ["//", "#", "--", "/*", "<!--"] {
+        if let Some(rest) = prev_line.strip_prefix(prefix) {
+            let rest = rest.trim();
+            let rest = rest.trim_end_matches("*/").trim_end_matches("-->").trim();
+
+            if rest == "axe-ignore" || rest == "axe-ignore-next-line" {
+                return true;
+            }
+            if let Some(ids) = rest
+                .strip_prefix("axe-ignore ")
+                .or_else(|| rest.strip_prefix("axe-ignore-next-line "))
+            {
+                return ids.split(',').map(|s| s.trim()).any(|id| id == rule_id);
+            }
+        }
+    }
+    false
 }
 
 /// Start the LSP server on stdio.

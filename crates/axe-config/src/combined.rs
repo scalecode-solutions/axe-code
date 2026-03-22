@@ -73,9 +73,13 @@ impl CombinedScan {
     }
 
     /// Scan a parsed document, returning all hits.
+    ///
+    /// If `src` is provided, suppression comments (`axe-ignore` / `axe-ignore-next-line`)
+    /// on the line above a match will suppress that hit.
     pub fn scan<'tree, D: Doc>(
         &self,
         root: &Node<'tree, D>,
+        src: &str,
     ) -> Vec<ScanHit<'tree, D>> {
         let mut hits = Vec::new();
 
@@ -86,6 +90,10 @@ impl CombinedScan {
             if let Some(rule_indices) = self.kind_map.get(kind) {
                 for &idx in rule_indices {
                     if let Some(m) = self.rules[idx].rule.match_node(node.clone()) {
+                        let node_line = m.node().start_pos().line;
+                        if is_suppressed(src, node_line, &self.rules[idx].id) {
+                            continue;
+                        }
                         hits.push(ScanHit { rule_idx: idx, node_match: m });
                     }
                 }
@@ -94,6 +102,10 @@ impl CombinedScan {
             // Check rules that match any kind.
             for &idx in &self.any_kind_rules {
                 if let Some(m) = self.rules[idx].rule.match_node(node.clone()) {
+                    let node_line = m.node().start_pos().line;
+                    if is_suppressed(src, node_line, &self.rules[idx].id) {
+                        continue;
+                    }
                     hits.push(ScanHit { rule_idx: idx, node_match: m });
                 }
             }
@@ -126,4 +138,40 @@ impl CombinedScan {
     pub fn rule_count(&self) -> usize {
         self.rules.len()
     }
+}
+
+/// Check if a hit at the given 0-indexed line is suppressed by a comment on the line above.
+///
+/// Supports `axe-ignore` (suppress all rules) and `axe-ignore <rule-id>` (suppress specific rule).
+/// Also supports `axe-ignore-next-line` as an alias.
+/// Recognizes comment prefixes: `//`, `#`, `--`, `/*`, `<!--`.
+fn is_suppressed(src: &str, line: usize, rule_id: &str) -> bool {
+    if line == 0 {
+        return false;
+    }
+    let lines: Vec<&str> = src.lines().collect();
+    let prev_line = if line <= lines.len() {
+        lines[line - 1].trim()
+    } else {
+        return false;
+    };
+
+    for prefix in ["//", "#", "--", "/*", "<!--"] {
+        if let Some(rest) = prev_line.strip_prefix(prefix) {
+            let rest = rest.trim();
+            // Strip trailing comment closers for block-style comments.
+            let rest = rest.trim_end_matches("*/").trim_end_matches("-->").trim();
+
+            if rest == "axe-ignore" || rest == "axe-ignore-next-line" {
+                return true; // Suppress all rules
+            }
+            if let Some(ids) = rest
+                .strip_prefix("axe-ignore ")
+                .or_else(|| rest.strip_prefix("axe-ignore-next-line "))
+            {
+                return ids.split(',').map(|s| s.trim()).any(|id| id == rule_id);
+            }
+        }
+    }
+    false
 }
