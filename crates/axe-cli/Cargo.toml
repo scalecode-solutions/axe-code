@@ -34,6 +34,8 @@ tree-sitter = { workspace = true }
 
 # CLI
 clap = { workspace = true }
+clap_complete = { workspace = true }
+crossbeam-channel = { workspace = true }
 ignore = { workspace = true }
 termcolor = { workspace = true }
 tracing = { workspace = true }

@@ -51,6 +51,8 @@ memchr = "2"
 
 # CLI
 clap = { version = "4", features = ["derive"] }
+clap_complete = "4"
+crossbeam-channel = "0.5"
 ignore = "0.4"
 termcolor = "1"
 tracing = "0.1"

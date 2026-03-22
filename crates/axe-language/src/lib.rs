@@ -11,7 +11,8 @@ use axe_core::language::Language;
 // Language macro — generates Language impl for simple languages
 // ---------------------------------------------------------------------------
 
-/// Generate a Language impl for languages where `$` is a valid identifier char.
+/// Generate a Language impl for languages where `$` works as identifier start.
+/// These languages use `$` -> `µ` substitution (meta_var_char = '$', expando = 'µ').
 macro_rules! impl_lang {
     ($name:ident, $ts_fn:expr) => {
         #[derive(Clone, Copy, Debug)]
@@ -62,7 +63,8 @@ macro_rules! impl_lang {
     };
 }
 
-/// Generate a Language impl for languages where `$` is syntax (e.g., PHP, Bash).
+/// Generate a Language impl for languages where `$` does NOT work as identifier
+/// start. Each such language has a specific expando char used internally.
 macro_rules! impl_lang_expando {
     ($name:ident, $ts_fn:expr, $expando:expr) => {
         #[derive(Clone, Copy, Debug)]
@@ -76,17 +78,17 @@ macro_rules! impl_lang_expando {
 
         impl Language for $name {
             fn meta_var_char(&self) -> char {
-                $expando
+                '$'
             }
 
             fn expando_char(&self) -> char {
-                'µ'
+                $expando
             }
 
             fn pre_process_pattern<'q>(&self, query: &'q str) -> Cow<'q, str> {
-                let mc = self.meta_var_char();
-                if query.contains(mc) {
-                    Cow::Owned(query.replace(mc, "µ"))
+                let ec = $expando;
+                if query.contains('$') {
+                    Cow::Owned(query.replace('$', &ec.to_string()))
                 } else {
                     Cow::Borrowed(query)
                 }
@@ -119,32 +121,40 @@ macro_rules! impl_lang_expando {
 }
 
 // ---------------------------------------------------------------------------
-// Built-in languages
+// Built-in languages — impl_lang! ($ works as identifier start)
 // ---------------------------------------------------------------------------
 
-impl_lang!(Rust, || tree_sitter_rust::LANGUAGE.into());
-impl_lang!(JavaScript, || tree_sitter_javascript::LANGUAGE.into());
-impl_lang!(TypeScript, || tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into());
-impl_lang!(Tsx, || tree_sitter_typescript::LANGUAGE_TSX.into());
-impl_lang!(Python, || tree_sitter_python::LANGUAGE.into());
-impl_lang!(Go, || tree_sitter_go::LANGUAGE.into());
+impl_lang!(Bash, || tree_sitter_bash::LANGUAGE.into());
 impl_lang!(Java, || tree_sitter_java::LANGUAGE.into());
-impl_lang!(C, || tree_sitter_c::LANGUAGE.into());
-impl_lang!(Cpp, || tree_sitter_cpp::LANGUAGE.into());
-impl_lang!(CSharp, || tree_sitter_c_sharp::LANGUAGE.into());
-impl_lang!(Css, || tree_sitter_css::LANGUAGE.into());
-impl_lang!(Html, || tree_sitter_html::LANGUAGE.into());
+impl_lang!(JavaScript, || tree_sitter_javascript::LANGUAGE.into());
 impl_lang!(Json, || tree_sitter_json::LANGUAGE.into());
-impl_lang!(Ruby, || tree_sitter_ruby::LANGUAGE.into());
-impl_lang!(Swift, || tree_sitter_swift::LANGUAGE.into());
-// TODO: kotlin and toml use older tree-sitter API, need version-compatible crates
-// impl_lang!(Kotlin, || tree_sitter_kotlin::language().into());
 impl_lang!(Lua, || tree_sitter_lua::LANGUAGE.into());
+impl_lang!(Scala, || tree_sitter_scala::LANGUAGE.into());
+impl_lang!(Solidity, || tree_sitter_solidity::LANGUAGE.into());
+impl_lang!(Tsx, || tree_sitter_typescript::LANGUAGE_TSX.into());
+impl_lang!(TypeScript, || tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into());
 impl_lang!(Yaml, || tree_sitter_yaml::LANGUAGE.into());
-// impl_lang!(Toml, || tree_sitter_toml::language().into());
 
-// Languages where $ is syntax
-impl_lang_expando!(Bash, || tree_sitter_bash::LANGUAGE.into(), '#');
+// ---------------------------------------------------------------------------
+// Built-in languages — impl_lang_expando! ($ does NOT work)
+// ---------------------------------------------------------------------------
+
+impl_lang_expando!(C, || tree_sitter_c::LANGUAGE.into(), '\u{10000}');
+impl_lang_expando!(Cpp, || tree_sitter_cpp::LANGUAGE.into(), '\u{10000}');
+impl_lang_expando!(CSharp, || tree_sitter_c_sharp::LANGUAGE.into(), 'µ');
+impl_lang_expando!(Css, || tree_sitter_css::LANGUAGE.into(), '_');
+impl_lang_expando!(Elixir, || tree_sitter_elixir::LANGUAGE.into(), 'µ');
+impl_lang_expando!(Go, || tree_sitter_go::LANGUAGE.into(), 'µ');
+impl_lang_expando!(Haskell, || tree_sitter_haskell::LANGUAGE.into(), 'µ');
+impl_lang_expando!(Hcl, || tree_sitter_hcl::LANGUAGE.into(), 'µ');
+impl_lang_expando!(Html, || tree_sitter_html::LANGUAGE.into(), 'z');
+impl_lang_expando!(Kotlin, || tree_sitter_kotlin::LANGUAGE.into(), 'µ');
+impl_lang_expando!(Nix, || tree_sitter_nix::LANGUAGE.into(), '_');
+impl_lang_expando!(Php, || tree_sitter_php::LANGUAGE_PHP_ONLY.into(), 'µ');
+impl_lang_expando!(Python, || tree_sitter_python::LANGUAGE.into(), 'µ');
+impl_lang_expando!(Ruby, || tree_sitter_ruby::LANGUAGE.into(), 'µ');
+impl_lang_expando!(Rust, || tree_sitter_rust::LANGUAGE.into(), 'µ');
+impl_lang_expando!(Swift, || tree_sitter_swift::LANGUAGE.into(), 'µ');
 
 // ---------------------------------------------------------------------------
 // SupportLang enum
@@ -158,18 +168,24 @@ pub enum SupportLang {
     Cpp,
     CSharp,
     Css,
+    Elixir,
     Go,
+    Haskell,
+    Hcl,
     Html,
     Java,
     JavaScript,
     Json,
-    // Kotlin,  // TODO: needs tree-sitter 0.26 compatible crate
+    Kotlin,
     Lua,
+    Nix,
+    Php,
     Python,
     Ruby,
     Rust,
+    Scala,
+    Solidity,
     Swift,
-    // Toml,  // TODO: needs tree-sitter 0.26 compatible crate
     TypeScript,
     Tsx,
     Yaml,
@@ -184,18 +200,24 @@ impl SupportLang {
             Self::Cpp => Cpp::ts_language(),
             Self::CSharp => CSharp::ts_language(),
             Self::Css => Css::ts_language(),
+            Self::Elixir => Elixir::ts_language(),
             Self::Go => Go::ts_language(),
+            Self::Haskell => Haskell::ts_language(),
+            Self::Hcl => Hcl::ts_language(),
             Self::Html => Html::ts_language(),
             Self::Java => Java::ts_language(),
             Self::JavaScript => JavaScript::ts_language(),
             Self::Json => Json::ts_language(),
-            // Self::Kotlin => Kotlin::ts_language(),
+            Self::Kotlin => Kotlin::ts_language(),
             Self::Lua => Lua::ts_language(),
+            Self::Nix => Nix::ts_language(),
+            Self::Php => Php::ts_language(),
             Self::Python => Python::ts_language(),
             Self::Ruby => Ruby::ts_language(),
             Self::Rust => Rust::ts_language(),
+            Self::Scala => Scala::ts_language(),
+            Self::Solidity => Solidity::ts_language(),
             Self::Swift => Swift::ts_language(),
-            // Self::Toml => Toml::ts_language(),
             Self::TypeScript => TypeScript::ts_language(),
             Self::Tsx => Tsx::ts_language(),
             Self::Yaml => Yaml::ts_language(),
@@ -210,18 +232,24 @@ impl SupportLang {
             Self::Cpp => &["cpp", "cc", "cxx", "hpp", "hxx", "h"],
             Self::CSharp => &["cs"],
             Self::Css => &["css"],
+            Self::Elixir => &["ex", "exs"],
             Self::Go => &["go"],
+            Self::Haskell => &["hs", "lhs"],
+            Self::Hcl => &["hcl", "tf", "tfvars"],
             Self::Html => &["html", "htm"],
             Self::Java => &["java"],
             Self::JavaScript => &["js", "mjs", "cjs"],
             Self::Json => &["json"],
-            // Self::Kotlin => &["kt", "kts"],
+            Self::Kotlin => &["kt", "kts"],
             Self::Lua => &["lua"],
+            Self::Nix => &["nix"],
+            Self::Php => &["php"],
             Self::Python => &["py", "pyi"],
             Self::Ruby => &["rb"],
             Self::Rust => &["rs"],
+            Self::Scala => &["scala", "sc"],
+            Self::Solidity => &["sol"],
             Self::Swift => &["swift"],
-            // Self::Toml => &["toml"],
             Self::TypeScript => &["ts", "mts", "cts"],
             Self::Tsx => &["tsx"],
             Self::Yaml => &["yml", "yaml"],
@@ -236,18 +264,24 @@ impl SupportLang {
             "cpp" | "c++" | "cc" => Some(Self::Cpp),
             "csharp" | "c#" | "cs" => Some(Self::CSharp),
             "css" => Some(Self::Css),
+            "elixir" | "ex" => Some(Self::Elixir),
             "go" | "golang" => Some(Self::Go),
+            "haskell" | "hs" => Some(Self::Haskell),
+            "hcl" | "terraform" | "tf" => Some(Self::Hcl),
             "html" => Some(Self::Html),
             "java" => Some(Self::Java),
             "javascript" | "js" => Some(Self::JavaScript),
             "json" => Some(Self::Json),
-            // "kotlin" | "kt" => Some(Self::Kotlin),
+            "kotlin" | "kt" => Some(Self::Kotlin),
             "lua" => Some(Self::Lua),
+            "nix" => Some(Self::Nix),
+            "php" => Some(Self::Php),
             "python" | "py" => Some(Self::Python),
             "ruby" | "rb" => Some(Self::Ruby),
             "rust" | "rs" => Some(Self::Rust),
+            "scala" => Some(Self::Scala),
+            "solidity" | "sol" => Some(Self::Solidity),
             "swift" => Some(Self::Swift),
-            // "toml" => Some(Self::Toml),
             "typescript" | "ts" => Some(Self::TypeScript),
             "tsx" => Some(Self::Tsx),
             "yaml" | "yml" => Some(Self::Yaml),
@@ -267,11 +301,6 @@ impl SupportLang {
         None
     }
 
-    /// Whether this language uses a non-standard meta-var char.
-    fn uses_expando(&self) -> bool {
-        matches!(self, Self::Bash)
-    }
-
     /// All supported languages.
     pub fn all() -> &'static [Self] {
         &[
@@ -280,18 +309,24 @@ impl SupportLang {
             Self::Cpp,
             Self::CSharp,
             Self::Css,
+            Self::Elixir,
             Self::Go,
+            Self::Haskell,
+            Self::Hcl,
             Self::Html,
             Self::Java,
             Self::JavaScript,
             Self::Json,
-            // Self::Kotlin,
+            Self::Kotlin,
             Self::Lua,
+            Self::Nix,
+            Self::Php,
             Self::Python,
             Self::Ruby,
             Self::Rust,
+            Self::Scala,
+            Self::Solidity,
             Self::Swift,
-            // Self::Toml,
             Self::TypeScript,
             Self::Tsx,
             Self::Yaml,
@@ -305,35 +340,31 @@ impl SupportLang {
 
 impl Language for SupportLang {
     fn pre_process_pattern<'q>(&self, query: &'q str) -> Cow<'q, str> {
-        let mc = self.meta_var_char();
+        // Users always write $VAR. We replace $ with the language's expando char.
         let ec = self.expando_char();
-        if mc == ec {
-            // Standard language — replace $ with µ.
-            if query.contains('$') {
-                Cow::Owned(query.replace('$', "µ"))
-            } else {
-                Cow::Borrowed(query)
-            }
+        if ec == '$' {
+            // No replacement needed (shouldn't happen with current languages).
+            Cow::Borrowed(query)
+        } else if query.contains('$') {
+            Cow::Owned(query.replace('$', &ec.to_string()))
         } else {
-            // Non-standard (e.g., Bash uses #).
-            if query.contains(mc) {
-                Cow::Owned(query.replace(mc, &ec.to_string()))
-            } else {
-                Cow::Borrowed(query)
-            }
+            Cow::Borrowed(query)
         }
     }
 
     fn meta_var_char(&self) -> char {
-        if self.uses_expando() {
-            '#' // Bash
-        } else {
-            '$'
-        }
+        // Users always write $VAR for all languages.
+        '$'
     }
 
     fn expando_char(&self) -> char {
-        'µ'
+        match self {
+            Self::C | Self::Cpp => '\u{10000}',
+            Self::Css | Self::Nix => '_',
+            Self::Html => 'z',
+            // All others use µ
+            _ => 'µ',
+        }
     }
 
     fn kind_to_id(&self, kind: &str) -> Option<u16> {
@@ -370,6 +401,14 @@ mod tests {
         assert_eq!(SupportLang::from_str("JavaScript"), Some(SupportLang::JavaScript));
         assert_eq!(SupportLang::from_str("c++"), Some(SupportLang::Cpp));
         assert_eq!(SupportLang::from_str("golang"), Some(SupportLang::Go));
+        assert_eq!(SupportLang::from_str("kotlin"), Some(SupportLang::Kotlin));
+        assert_eq!(SupportLang::from_str("elixir"), Some(SupportLang::Elixir));
+        assert_eq!(SupportLang::from_str("hcl"), Some(SupportLang::Hcl));
+        assert_eq!(SupportLang::from_str("nix"), Some(SupportLang::Nix));
+        assert_eq!(SupportLang::from_str("php"), Some(SupportLang::Php));
+        assert_eq!(SupportLang::from_str("scala"), Some(SupportLang::Scala));
+        assert_eq!(SupportLang::from_str("solidity"), Some(SupportLang::Solidity));
+        assert_eq!(SupportLang::from_str("haskell"), Some(SupportLang::Haskell));
         assert_eq!(SupportLang::from_str("nope"), None);
     }
 
@@ -378,6 +417,11 @@ mod tests {
         assert_eq!(SupportLang::from_extension("rs"), Some(SupportLang::Rust));
         assert_eq!(SupportLang::from_extension(".py"), Some(SupportLang::Python));
         assert_eq!(SupportLang::from_extension("tsx"), Some(SupportLang::Tsx));
+        assert_eq!(SupportLang::from_extension("kt"), Some(SupportLang::Kotlin));
+        assert_eq!(SupportLang::from_extension("ex"), Some(SupportLang::Elixir));
+        assert_eq!(SupportLang::from_extension("sol"), Some(SupportLang::Solidity));
+        assert_eq!(SupportLang::from_extension("nix"), Some(SupportLang::Nix));
+        assert_eq!(SupportLang::from_extension("tf"), Some(SupportLang::Hcl));
         assert_eq!(SupportLang::from_extension("xyz"), None);
     }
 
@@ -386,5 +430,23 @@ mod tests {
         for lang in SupportLang::all() {
             assert!(!lang.file_types().is_empty(), "{lang:?} has no file types");
         }
+    }
+
+    #[test]
+    fn expando_chars_correct() {
+        use axe_core::language::Language;
+        assert_eq!(SupportLang::C.expando_char(), '\u{10000}');
+        assert_eq!(SupportLang::Cpp.expando_char(), '\u{10000}');
+        assert_eq!(SupportLang::Css.expando_char(), '_');
+        assert_eq!(SupportLang::Nix.expando_char(), '_');
+        assert_eq!(SupportLang::Html.expando_char(), 'z');
+        assert_eq!(SupportLang::Rust.expando_char(), 'µ');
+        assert_eq!(SupportLang::Python.expando_char(), 'µ');
+        assert_eq!(SupportLang::Go.expando_char(), 'µ');
+    }
+
+    #[test]
+    fn all_languages_count() {
+        assert_eq!(SupportLang::all().len(), 26);
     }
 }

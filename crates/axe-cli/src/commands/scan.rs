@@ -4,14 +4,16 @@ use crate::output::OutputFormat;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
+use std::sync::Arc;
+use std::thread;
 
-use axe_config::{CombinedScan, CompileContext, RuleConfig, ScanHit, Severity, compile_rule};
+use crossbeam_channel::bounded;
+
+use axe_config::{CombinedScan, CompileContext, RuleConfig, Severity, compile_rule};
 use axe_core::node::Root;
 use axe_language::SupportLang;
 use axe_tree_sitter::doc::StrDoc;
 use axe_tree_sitter::pattern::TsPattern;
-
-type CliDoc = StrDoc<SupportLang>;
 
 #[derive(clap::Args, Debug)]
 pub struct ScanArgs {
@@ -34,6 +36,20 @@ pub struct ScanArgs {
     /// Maximum number of results
     #[arg(long)]
     pub max_results: Option<usize>,
+}
+
+/// A scan hit sent through the channel from worker threads.
+struct ScanResult {
+    path: PathBuf,
+    hits: Vec<ScanHitEntry>,
+}
+
+/// A single scan hit entry extracted from the tree (thread-safe, owns its data).
+struct ScanHitEntry {
+    rule_idx: usize,
+    line: usize,
+    col: usize,
+    text: String,
 }
 
 pub fn execute(args: ScanArgs, format: OutputFormat) -> Result<ExitCode, Box<dyn std::error::Error>> {
@@ -75,6 +91,8 @@ pub fn execute(args: ScanArgs, format: OutputFormat) -> Result<ExitCode, Box<dyn
             .push((compiled, config));
     }
 
+    let max_results = args.max_results;
+
     let mut out = std::io::BufWriter::new(std::io::stdout().lock());
     let mut total_hits = 0u64;
 
@@ -87,35 +105,94 @@ pub fn execute(args: ScanArgs, format: OutputFormat) -> Result<ExitCode, Box<dyn
         _ => {}
     }
 
-    // For each language, build a CombinedScan and walk files.
+    // For each language, build a CombinedScan and walk files in parallel.
     for (lang_str, rules) in &lang_rules {
         let lang = SupportLang::from_str(lang_str).unwrap();
-        let scanner = CombinedScan::new(rules.clone());
+        let scanner = Arc::new(CombinedScan::new(rules.clone()));
 
-        for base_path in &args.paths {
-            let walker = ignore::WalkBuilder::new(base_path)
-                .hidden(true)
-                .git_ignore(true)
-                .build();
+        // Collect rule metadata for output (so we can use it from the receiver thread).
+        let rule_meta: Vec<(String, Severity, Option<String>)> = (0..rules.len())
+            .map(|i| {
+                (
+                    scanner.rule_id(i).to_string(),
+                    scanner.severity(i),
+                    scanner.message(i).map(|s| s.to_string()),
+                )
+            })
+            .collect();
+        let rule_meta = Arc::new(rule_meta);
 
-            for entry in walker.flatten() {
-                if !entry.file_type().is_some_and(|ft| ft.is_file()) {
-                    continue;
+        let file_types: Vec<&'static str> = lang.file_types().to_vec();
+        let file_types = Arc::new(file_types);
+
+        let (tx, rx) = bounded::<ScanResult>(256);
+
+        // Build parallel walker for all paths.
+        let mut builder = ignore::WalkBuilder::new(&args.paths[0]);
+        for p in &args.paths[1..] {
+            builder.add(p);
+        }
+        let walker = builder
+            .hidden(true)
+            .git_ignore(true)
+            .build_parallel();
+
+        // Spawn receiver thread for output.
+        let rule_meta_recv = Arc::clone(&rule_meta);
+        let output_handle = thread::spawn(move || -> Result<u64, Box<dyn std::error::Error + Send + Sync>> {
+            let mut out = std::io::BufWriter::new(std::io::stdout().lock());
+            let mut hit_count = 0u64;
+
+            for result in rx {
+                for entry in &result.hits {
+                    let (ref rule_id, severity, ref message) = rule_meta_recv[entry.rule_idx];
+                    if !meets_severity(severity, min_severity) {
+                        continue;
+                    }
+                    if max_results.is_some_and(|m| hit_count >= m as u64) {
+                        break;
+                    }
+                    let msg = message.as_deref().unwrap_or(rule_id);
+                    emit_scan_entry(
+                        &result.path, entry.line, entry.col,
+                        rule_id, severity, msg, &entry.text,
+                        format, &mut out,
+                    )?;
+                    hit_count += 1;
                 }
+            }
+
+            out.flush()?;
+            Ok(hit_count)
+        });
+
+        // Run parallel walker.
+        walker.run(|| {
+            let tx = tx.clone();
+            let file_types = Arc::clone(&file_types);
+            let scanner = Arc::clone(&scanner);
+
+            Box::new(move |entry| {
+                let entry = match entry {
+                    Ok(e) => e,
+                    Err(_) => return ignore::WalkState::Continue,
+                };
+
+                if !entry.file_type().is_some_and(|ft| ft.is_file()) {
+                    return ignore::WalkState::Continue;
+                }
+
                 let path = entry.path();
                 let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
-                if !lang.file_types().contains(&ext) {
-                    continue;
-                }
-                if at_limit(total_hits, args.max_results) {
-                    break;
+                if !file_types.contains(&ext) {
+                    return ignore::WalkState::Continue;
                 }
 
                 let src = match std::fs::read_to_string(path) {
                     Ok(s) => s,
                     Err(e) => {
                         tracing::warn!("{}: {e}", path.display());
-                        continue;
+                        return ignore::WalkState::Continue;
                     }
                 };
 
@@ -123,25 +200,42 @@ pub fn execute(args: ScanArgs, format: OutputFormat) -> Result<ExitCode, Box<dyn
                     Ok(d) => d,
                     Err(e) => {
                         tracing::warn!("{}: parse error: {e}", path.display());
-                        continue;
+                        return ignore::WalkState::Continue;
                     }
                 };
                 let root = Root::new(doc);
                 let hits = scanner.scan(&root.root());
 
-                for hit in hits {
-                    let severity = scanner.severity(hit.rule_idx);
-                    if !meets_severity(severity, min_severity) {
-                        continue;
-                    }
-                    if at_limit(total_hits, args.max_results) {
-                        break;
-                    }
-                    emit_hit(path, &hit, &scanner, format, &mut out)?;
-                    total_hits += 1;
+                if hits.is_empty() {
+                    return ignore::WalkState::Continue;
                 }
-            }
-        }
+
+                let entries: Vec<ScanHitEntry> = hits
+                    .iter()
+                    .map(|hit| {
+                        let node = hit.node_match.node();
+                        ScanHitEntry {
+                            rule_idx: hit.rule_idx,
+                            line: node.start_pos().line + 1,
+                            col: node.start_pos().column + 1,
+                            text: node.text().to_string(),
+                        }
+                    })
+                    .collect();
+
+                let _ = tx.send(ScanResult {
+                    path: path.to_path_buf(),
+                    hits: entries,
+                });
+
+                ignore::WalkState::Continue
+            })
+        });
+        drop(tx);
+
+        let hits = output_handle.join().unwrap()
+            .map_err(|e| -> Box<dyn std::error::Error> { e })?;
+        total_hits += hits;
     }
 
     out.flush()?;
@@ -226,20 +320,17 @@ fn load_rule_from_json(json: &str) -> Result<RuleConfig, Box<dyn std::error::Err
 // Output
 // ---------------------------------------------------------------------------
 
-fn emit_hit(
+fn emit_scan_entry(
     path: &Path,
-    hit: &ScanHit<'_, CliDoc>,
-    scanner: &CombinedScan,
+    line: usize,
+    col: usize,
+    rule_id: &str,
+    severity: Severity,
+    message: &str,
+    text: &str,
     format: OutputFormat,
     out: &mut impl Write,
-) -> Result<(), Box<dyn std::error::Error>> {
-    let node = hit.node_match.node();
-    let line = node.start_pos().line + 1;
-    let col = node.start_pos().column + 1;
-    let rule_id = scanner.rule_id(hit.rule_idx);
-    let severity = scanner.severity(hit.rule_idx);
-    let message = scanner.message(hit.rule_idx).unwrap_or(rule_id);
-    let text = node.text();
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let display_path = path.display();
     let sev_str = severity_str(severity);
 
@@ -325,6 +416,3 @@ fn json_escape(s: &str) -> String {
         .replace('\t', "\\t")
 }
 
-fn at_limit(count: u64, max: Option<usize>) -> bool {
-    max.is_some_and(|m| count >= m as u64)
-}
